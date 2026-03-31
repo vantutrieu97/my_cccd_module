@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cccd_vietnam/dmrtd.dart';
@@ -14,6 +15,7 @@ import 'package:flutter_platform_widgets/flutter_platform_widgets.dart';
 import 'package:logging/logging.dart';
 import 'package:cccd_vietnam/src/proto/can_key.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'package:asn1lib/asn1lib.dart';
 
@@ -261,6 +263,25 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     };
   }
 
+
+
+/// Lưu ảnh DG2 ra file cache để host đọc qua đường dẫn (tránh JSON/base64 quá nặng).
+Future<String?> _persistDg2ImagePath(MrtdData data) async {
+  final dg2 = data.dg2;
+  if (dg2 == null) return null;
+  try {
+    final Uint8List? img = dg2.imageData;
+    final bytes = (img != null && img.isNotEmpty) ? img : dg2.toBytes();
+    if (bytes.isEmpty) return null;
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/dg2_${DateTime.now().microsecondsSinceEpoch}.jpg');
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  } catch (_) {
+    return null;
+  }
+}
+
   /// Ảnh khuôn mặt DG2 — JPEG bytes base64 cho host [BitmapFactory.decodeByteArray].
   String? _dg2ImageBase64(MrtdData data) {
     final dg2 = data.dg2;
@@ -274,7 +295,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     }
   }
 
-  Map<String, dynamic> _buildScanResultMap(MrtdData data) {
+  Future<Map<String, dynamic>> _buildScanResultMap(MrtdData data) async {
     final m = data.dg1?.mrz;
     final int? ageFromMrz = m != null ? ageYearsFromBirth(m.dateOfBirth) : null;
     final fullFromMrz = m != null ? '${m.lastName} ${m.firstName}'.trim() : '';
@@ -304,13 +325,16 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
       final dg2B64 = _dg2ImageBase64(data);
       if (dg2B64 != null) map['dg2ImageBase64'] = dg2B64;
     }
+    final dg2Path = await _persistDg2ImagePath(data);
+    if (dg2Path != null) map['dg2ImagePath'] = dg2Path;
     return map;
   }
 
   /// `true` khi host đã nhận lệnh đóng activity (thường là đang quay về app chính).
   Future<bool> _returnScanResultToHost(MrtdData data) async {
     if (!mounted) return false;
-    final ok = await CccdHostBridge.finishWithJson(_buildScanResultMap(data));
+    final payload = await _buildScanResultMap(data);
+    final ok = await CccdHostBridge.finishWithJson(payload);
     if (!ok) _log.warning('finishWithResult failed or not Android host');
     return ok;
   }
