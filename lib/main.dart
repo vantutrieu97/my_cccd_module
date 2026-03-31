@@ -1,11 +1,11 @@
 // Created by Crt Vavros, copyright © 2022 ZeroPass. All rights reserved.
 // ignore_for_file: prefer_adjacent_string_concatenation, prefer_interpolation_to_compose_strings
 
-import 'package:expandable/expandable.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:cccd_vietnam/dmrtd.dart';
 import 'package:cccd_vietnam/extensions.dart';
@@ -16,33 +16,9 @@ import 'package:cccd_vietnam/src/proto/can_key.dart';
 import 'package:intl/intl.dart';
 
 import 'package:asn1lib/asn1lib.dart';
-import 'mrz_scanner_screen.dart';
 
-class MrtdData {
-  EfCardAccess? cardAccess;
-  EfCardSecurity? cardSecurity;
-  EfCOM? com;
-  EfSOD? sod;
-  EfDG1? dg1;
-  EfDG2? dg2;
-  EfDG3? dg3;
-  EfDG4? dg4;
-  EfDG5? dg5;
-  EfDG6? dg6;
-  EfDG7? dg7;
-  EfDG8? dg8;
-  EfDG9? dg9;
-  EfDG10? dg10;
-  EfDG11? dg11;
-  EfDG12? dg12;
-  EfDG13? dg13;
-  EfDG14? dg14;
-  EfDG15? dg15;
-  EfDG16? dg16;
-  Uint8List? aaSig;
-  bool? isPACE;
-  bool? isDBA;
-}
+import 'mrtd_data.dart';
+import 'cccd_host_bridge.dart';
 
 final Map<DgTag, String> dgTagToString = {
   EfDG1.TAG: 'EF.DG1',
@@ -62,42 +38,6 @@ final Map<DgTag, String> dgTagToString = {
   EfDG15.TAG: 'EF.DG15',
   EfDG16.TAG: 'EF.DG16',
 };
-
-Widget _makeMrtdAccessDataWidget({
-  required String header,
-  required String collapsedText,
-  required bool isPACE,
-  required bool isDBA,
-}) {
-  return ExpandablePanel(
-    theme: const ExpandableThemeData(
-      headerAlignment: ExpandablePanelHeaderAlignment.center,
-      tapBodyToCollapse: true,
-      hasIcon: true,
-      iconColor: Colors.red,
-    ),
-    header: Text(header),
-    collapsed: Text(collapsedText, softWrap: true, maxLines: 2, overflow: TextOverflow.ellipsis),
-    expanded: Container(
-      padding: const EdgeInsets.all(18),
-      color: Color.fromARGB(255, 239, 239, 239),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            'Access protocol: ${isPACE ? "PACE" : "BAC"}',
-            //style: TextStyle(fontSize: 16.0),
-          ),
-          SizedBox(height: 8.0),
-          Text(
-            'Access key type: ${isDBA ? "DBA" : "CAN"}',
-            //style: TextStyle(fontSize: 16.0),
-          ),
-        ],
-      ),
-    ),
-  );
-}
 
 String formatEfCom(final EfCOM efCom) {
   var str =
@@ -125,8 +65,8 @@ String formatMRZ(final MRZ mrz) {
       "  name: ${mrz.firstName}\n" +
       "  surname: ${mrz.lastName}\n" +
       "  gender: ${mrz.gender}\n" +
-      "  date of birth: ${DateFormat.yMd().format(mrz.dateOfBirth)}\n" +
-      "  date of expiry: ${DateFormat.yMd().format(mrz.dateOfExpiry)}\n" +
+      "  date of birth: ${kDisplayDateFormat.format(mrz.dateOfBirth)}\n" +
+      "  date of expiry: ${kDisplayDateFormat.format(mrz.dateOfExpiry)}\n" +
       "  add. data: ${mrz.optionalData}\n" +
       "  add. data: ${mrz.optionalData2}";
 }
@@ -166,28 +106,62 @@ String formatProgressMsg(String message, int percentProgress) {
   return message + "\n\n" + full + empty;
 }
 
+/// Giới tính chuẩn cho host (CreateKyc API dùng MALE/FEMALE).
+String genderNormalizedFromMrz(String raw) {
+  final t = raw.trim().toUpperCase();
+  if (t.startsWith('M')) return 'MALE';
+  if (t.startsWith('F')) return 'FEMALE';
+  return raw.trim();
+}
+
+String mrzVersionToString(dynamic version) => version.toString();
+
+/// Tuổi tính tại thời điểm gửi về host (null nếu không hợp lệ).
+int? ageYearsFromBirth(DateTime birth) {
+  final now = DateTime.now();
+  var age = now.year - birth.year;
+  if (now.month < birth.month || (now.month == birth.month && now.day < birth.day)) {
+    age--;
+  }
+  if (age < 0 || age > 130) return null;
+  return age;
+}
+
+/// Chuẩn hóa số định danh dùng cho BAC/DBA: chỉ lấy 9 số cuối.
+String normalizeDocNumberForRead(String raw) {
+  final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+  if (digits.length <= 9) return digits;
+  return digits.substring(digits.length - 9);
+}
+
+/// Hiển thị / gửi về host đồng bộ với Create Profile (`dd/MM/yyyy`). BAC nhận `DateTime` từ giá trị đã parse.
+final DateFormat kDisplayDateFormat = DateFormat('dd/MM/yyyy');
+
+DateTime? tryParseDisplayDate(String? raw) {
+  if (raw == null || raw.trim().isEmpty) return null;
+  try {
+    return kDisplayDateFormat.parseStrict(raw.trim());
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Tạm tắt: `dg2ImageBase64` làm payload nặng / bridge lỗi. Đặt `true` khi gửi ảnh lại được.
+const bool kSendDg2ImageBase64ToHost = false;
+
 void main() {
   Logger.root.level = Level.ALL;
   Logger.root.logSensitiveData = true;
   Logger.root.onRecord.listen((record) {
     print('${record.loggerName} ${record.level.name}: ${record.time}: ${record.message}');
   });
-  runApp(MrtdEgApp());
+  runApp(MaterialApp(home: MrtdHomePage(), debugShowCheckedModeBanner: false));
 }
 
 class MrtdEgApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return PlatformApp(
-      localizationsDelegates: [
-        DefaultMaterialLocalizations.delegate,
-        DefaultCupertinoLocalizations.delegate,
-        DefaultWidgetsLocalizations.delegate,
-      ],
-      material: (_, __) => MaterialAppData(),
-      cupertino: (_, __) => CupertinoAppData(),
-      home: MrtdHomePage(),
-    );
+    return Scaffold(body: MrtdHomePage());
   }
 }
 
@@ -205,14 +179,11 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
   final _mrzData = GlobalKey<FormState>();
   final _canData = GlobalKey<FormState>();
 
-  /// số cccd full là 006097003207
-  // mrz data
-  final _docNumber = TextEditingController(text: '097003207');
-
-  // final _docNumber = TextEditingController(text: '001200004');
-  final _dob = TextEditingController(text: '08/07/1997'); // date of birth
-  final _doe = TextEditingController(text: '08/07/2037');
-  final _can = TextEditingController(text: '003207');
+  /// Giá trị mặc định khi host không prefill (hoặc gửi rỗng); user vẫn sửa được trên form.
+  final _docNumber = TextEditingController(text: '301005420');
+  final _dob = TextEditingController(text: '16/03/2001');
+  final _doe = TextEditingController(text: '16/03/2041');
+  final _can = TextEditingController(text: '');
   bool _checkBoxPACE = false;
 
   MrtdData? _mrtdData;
@@ -231,14 +202,148 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     _tabController = TabController(length: 2, vsync: this);
     //_tabController.addListener(_handleTabSelection);
 
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]);
+    // Đồng bộ kiosk (app host ngang): module không ép dọc.
+    SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
 
     _initPlatformState();
+    _loadHostPrefillData();
 
     // Update platform state every 3 sec
     _timerStateUpdater = Timer.periodic(Duration(seconds: 3), (Timer t) {
       _initPlatformState();
     });
+  }
+
+  Future<void> _loadHostPrefillData() async {
+    try {
+      final map = await CccdHostBridge.getLaunchArgs();
+      if (map == null) return;
+      final cccd = (map['cccd'] ?? '').toString().trim();
+      final dob = (map['dob'] ?? '').toString().trim();
+      final doe = (map['doe'] ?? '').toString().trim();
+
+      if (!mounted) return;
+      setState(() {
+        // Chỉ điền từng ô khi host gửi giá trị; để trống → vẫn nhập tay bình thường
+        if (cccd.isNotEmpty) _docNumber.text = cccd;
+        if (dob.isNotEmpty) _dob.text = dob;
+        if (doe.isNotEmpty) _doe.text = doe;
+        _tabController.index = 0;
+      });
+    } catch (e, st) {
+      _log.warning('getLaunchArgs failed: $e\n$st');
+    }
+  }
+
+  /// DG1 đầy đủ cho host (Kotlin hiển thị form / MRZ).
+  Map<String, dynamic>? _dg1Payload(MrtdData data) {
+    final dg1 = data.dg1;
+    if (dg1 == null) return null;
+    final m = dg1.mrz;
+    final age = ageYearsFromBirth(m.dateOfBirth);
+    return <String, dynamic>{
+      'mrzFormatted': formatMRZ(m),
+      'version': mrzVersionToString(m.version),
+      'documentCode': m.documentCode,
+      'documentNumber': m.documentNumber,
+      'country': m.country,
+      'nationality': m.nationality,
+      'firstName': m.firstName,
+      'lastName': m.lastName,
+      'fullName': '${m.lastName} ${m.firstName}'.trim(),
+      'gender': m.gender,
+      'genderNormalized': genderNormalizedFromMrz(m.gender),
+      'dateOfBirth': kDisplayDateFormat.format(m.dateOfBirth),
+      'dateOfExpiry': kDisplayDateFormat.format(m.dateOfExpiry),
+      if (age != null) 'age': age,
+      'optionalData': m.optionalData,
+      'optionalData2': m.optionalData2,
+    };
+  }
+
+  /// Ảnh khuôn mặt DG2 — JPEG bytes base64 cho host [BitmapFactory.decodeByteArray].
+  String? _dg2ImageBase64(MrtdData data) {
+    final dg2 = data.dg2;
+    if (dg2 == null) return null;
+    try {
+      final Uint8List? img = dg2.imageData;
+      if (img != null && img.isNotEmpty) return base64Encode(img);
+      return base64Encode(dg2.toBytes());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Map<String, dynamic> _buildScanResultMap(MrtdData data) {
+    final m = data.dg1?.mrz;
+    final int? ageFromMrz = m != null ? ageYearsFromBirth(m.dateOfBirth) : null;
+    final fullFromMrz = m != null ? '${m.lastName} ${m.firstName}'.trim() : '';
+    final map = <String, dynamic>{
+      'cccd': (m?.documentNumber ?? _docNumber.text).trim(),
+      'dob': m != null ? kDisplayDateFormat.format(m.dateOfBirth) : _dob.text.trim(),
+      'doe': m != null ? kDisplayDateFormat.format(m.dateOfExpiry) : _doe.text.trim(),
+      if (m != null) ...{
+        'firstName': m.firstName,
+        'lastName': m.lastName,
+        'fullName': fullFromMrz,
+        'gender': m.gender,
+        'genderNormalized': genderNormalizedFromMrz(m.gender),
+        'nationality': m.nationality,
+        'country': m.country,
+        'documentCode': m.documentCode,
+        'mrzVersion': mrzVersionToString(m.version),
+        if (ageFromMrz != null) 'age': ageFromMrz,
+      },
+      'isPACE': data.isPACE,
+      'isDBA': data.isDBA,
+      'hasDg2Photo': data.dg2 != null,
+    };
+    final d1 = _dg1Payload(data);
+    if (d1 != null) map['dg1'] = d1;
+    if (kSendDg2ImageBase64ToHost) {
+      final dg2B64 = _dg2ImageBase64(data);
+      if (dg2B64 != null) map['dg2ImageBase64'] = dg2B64;
+    }
+    return map;
+  }
+
+  /// `true` khi host đã nhận lệnh đóng activity (thường là đang quay về app chính).
+  Future<bool> _returnScanResultToHost(MrtdData data) async {
+    if (!mounted) return false;
+    final ok = await CccdHostBridge.finishWithJson(_buildScanResultMap(data));
+    if (!ok) _log.warning('finishWithResult failed or not Android host');
+    return ok;
+  }
+
+  /// Gửi số liệu đang nhập trên form về host (không cần đọc chip xong).
+  Future<void> _sendFormToHost() async {
+    if (_isReading) return;
+    // Đã đọc chip: gửi đủ DG1 + ảnh DG2 (không dùng manual_form — host mới có dialog / ảnh).
+    if (_mrtdData != null) {
+      final ok = await _returnScanResultToHost(_mrtdData!);
+      if (mounted && !ok) {
+        setState(() => _alertMessage = 'Không gửi được về host (standalone / lỗi bridge).');
+      }
+      return;
+    }
+    final ok = await CccdHostBridge.finishWithJson({
+      'cccd': _docNumber.text.trim(),
+      'dob': _dob.text.trim(),
+      'doe': _doe.text.trim(),
+      'source': 'manual_form',
+    });
+    if (mounted && !ok) {
+      setState(() => _alertMessage = 'Không gửi được về host (standalone / lỗi bridge).');
+    }
+  }
+
+  /// Đóng module với `RESULT_OK` và JSON hủy — host đọc `cancelled` thay vì `RESULT_CANCELED`.
+  Future<void> _cancelToHost() async {
+    if (_isReading) return;
+    final ok = await CccdHostBridge.finishWithJson({'cancelled': true, 'source': 'user_cancel'});
+    if (mounted && !ok) {
+      setState(() => _alertMessage = 'Không gửi được về host (standalone / lỗi bridge).');
+    }
   }
 
   // Platform messages are asynchronous, so we initialize in an async method.
@@ -261,19 +366,9 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     });
   }
 
-  DateTime? _getDOBDate() {
-    if (_dob.text.isEmpty) {
-      return null;
-    }
-    return DateFormat.yMd().parse(_dob.text);
-  }
+  DateTime? _getDOBDate() => tryParseDisplayDate(_dob.text);
 
-  DateTime? _getDOEDate() {
-    if (_doe.text.isEmpty) {
-      return null;
-    }
-    return DateFormat.yMd().parse(_doe.text);
-  }
+  DateTime? _getDOEDate() => tryParseDisplayDate(_doe.text);
 
   Future<String?> _pickDate(BuildContext context, DateTime firstDate, DateTime initDate, DateTime lastDate) async {
     final locale = Localizations.localeOf(context);
@@ -286,7 +381,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     );
 
     if (picked != null) {
-      return DateFormat.yMd().format(picked);
+      return kDisplayDateFormat.format(picked);
     }
     return null;
   }
@@ -313,7 +408,19 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
       //If there is an error, just jump out of the function
       if (errorText.isNotEmpty) return;
 
-      final bacKeySeed = DBAKey(_docNumber.text, _getDOBDate()!, _getDOEDate()!, paceMode: _checkBoxPACE);
+      if (_getDOBDate() == null || _getDOEDate() == null) {
+        setState(() {
+          _alertMessage = 'Ngày sinh / ngày hết hạn: dùng đúng DD/MM/YYYY (vd. 16/03/2001).';
+        });
+        return;
+      }
+
+      final docForBac = normalizeDocNumberForRead(_docNumber.text);
+      if (docForBac.isEmpty) {
+        setState(() => _alertMessage = 'Please enter passport number!');
+        return;
+      }
+      final bacKeySeed = DBAKey(docForBac, _getDOBDate()!, _getDOEDate()!, paceMode: _checkBoxPACE);
       _readMRTD(accessKey: bacKeySeed, isPace: _checkBoxPACE);
     } else {
       //PACE tab
@@ -339,7 +446,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     try {
       setState(() {
         _mrtdData = null;
-        _alertMessage = "Waiting for Passport tag ...";
+        _alertMessage = "Waiting for CCCD tag ...";
         _isReading = true;
       });
       try {
@@ -349,7 +456,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
         final passport = Passport(_nfc);
 
         setState(() {
-          _alertMessage = "Reading Passport ...";
+          _alertMessage = "Reading CCCD ...";
         });
 
         _nfc.setIosAlertMessage("Trying to read EF.CardAccess ...");
@@ -398,10 +505,11 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
           print("Using BAC session...");
           //BAC session
 
-          print('docNumber: ${_docNumber.text}');
+          final docForBac = normalizeDocNumberForRead(_docNumber.text);
+          print('docNumber (BAC): $docForBac');
           print('dob: ${_getDOBDate()}');
           print('doe: ${_getDOEDate()}');
-          final dbakey = DBAKey(_docNumber.text, _getDOBDate()!, _getDOEDate()!);
+          final dbakey = DBAKey(docForBac, _getDOBDate()!, _getDOEDate()!);
           await passport.startSession(dbakey);
           print("BAC session successful");
         }
@@ -421,67 +529,8 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
           mrtdData.dg2 = await passport.readEfDG2();
         }
 
-        // To read DG3 and DG4 session has to be established with CVCA certificate (not supported).
-        // if(mrtdData.com!.dgTags.contains(EfDG3.TAG)) {
-        //   mrtdData.dg3 = await passport.readEfDG3();
-        // }
-
-        // if(mrtdData.com!.dgTags.contains(EfDG4.TAG)) {
-        //   mrtdData.dg4 = await passport.readEfDG4();
-        // }
-
-        if (mrtdData.com!.dgTags.contains(EfDG5.TAG)) {
-          mrtdData.dg5 = await passport.readEfDG5();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG6.TAG)) {
-          mrtdData.dg6 = await passport.readEfDG6();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG7.TAG)) {
-          mrtdData.dg7 = await passport.readEfDG7();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG8.TAG)) {
-          mrtdData.dg8 = await passport.readEfDG8();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG9.TAG)) {
-          mrtdData.dg9 = await passport.readEfDG9();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG10.TAG)) {
-          mrtdData.dg10 = await passport.readEfDG10();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG11.TAG)) {
-          mrtdData.dg11 = await passport.readEfDG11();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG12.TAG)) {
-          mrtdData.dg12 = await passport.readEfDG12();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG13.TAG)) {
-          mrtdData.dg13 = await passport.readEfDG13();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG14.TAG)) {
-          mrtdData.dg14 = await passport.readEfDG14();
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG15.TAG)) {
-          mrtdData.dg15 = await passport.readEfDG15();
-          _nfc.setIosAlertMessage(formatProgressMsg("Doing AA ...", 60));
-          mrtdData.aaSig = await passport.activeAuthenticate(Uint8List(8));
-        }
-
-        if (mrtdData.com!.dgTags.contains(EfDG16.TAG)) {
-          mrtdData.dg16 = await passport.readEfDG16();
-        }
-
-        _nfc.setIosAlertMessage(formatProgressMsg("Reading EF.SOD ...", 80));
-        mrtdData.sod = await passport.readEfSOD();
+        // Chỉ DG1 + DG2: không đọc DG5–DG16 / SOD / Active Authenticate → nhanh hơn rõ rệt.
+        _nfc.setIosAlertMessage(formatProgressMsg("Xong DG1/DG2", 100));
 
         setState(() {
           _mrtdData = mrtdData;
@@ -491,7 +540,10 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
           _alertMessage = "";
         });
 
-        _scrollController.animateTo(300.0, duration: Duration(milliseconds: 500), curve: Curves.ease);
+        final hostClosed = await _returnScanResultToHost(mrtdData);
+        if (mounted && !hostClosed) {
+          _scrollController.animateTo(300.0, duration: const Duration(milliseconds: 500), curve: Curves.ease);
+        }
       } on Exception catch (e) {
         final se = e.toString().toLowerCase();
         String alertMsg = "An error has occurred while reading Passport!";
@@ -505,7 +557,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
         }
 
         if (se.contains('timeout')) {
-          alertMsg = "Timeout while waiting for Passport tag";
+          alertMsg = "Timeout while waiting for CCCD tag";
         } else if (se.contains("tag was lost")) {
           alertMsg = "Tag was lost. Please try again!";
         } else if (se.contains("invalidated by user")) {
@@ -534,7 +586,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     try {
       setState(() {
         _mrtdData = null;
-        _alertMessage = "Waiting for Passport tag ...";
+        _alertMessage = "Waiting for CCCD tag ...";
         _isReading = true;
       });
 
@@ -542,7 +594,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
       final passport = Passport(_nfc);
 
       setState(() {
-        _alertMessage = "Reading Passport ...";
+        _alertMessage = "Reading CCCD ...";
       });
 
       _nfc.setIosAlertMessage("Trying to read EF.CardAccess ...");
@@ -563,7 +615,8 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
       }
 
       _nfc.setIosAlertMessage("Initiating session ...");
-      final bacKeySeed = DBAKey(_docNumber.text, _getDOBDate()!, _getDOEDate()!);
+      final docForBac = normalizeDocNumberForRead(_docNumber.text);
+      final bacKeySeed = DBAKey(docForBac, _getDOBDate()!, _getDOEDate()!);
       await passport.startSession(bacKeySeed);
 
       _nfc.setIosAlertMessage(formatProgressMsg("Reading EF.COM ...", 0));
@@ -663,7 +716,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
       }
 
       if (se.contains('timeout')) {
-        alertMsg = "Timeout while waiting for Passport tag";
+        alertMsg = "Timeout while waiting for CCCD tag";
       } else if (se.contains("tag was lost")) {
         alertMsg = "Tag was lost. Please try again!";
       } else if (se.contains("invalidated by user")) {
@@ -695,197 +748,48 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
     return _isReading || !_isNfcAvailable;
   }
 
-  Widget _makeMrtdDataWidget({required String header, required String collapsedText, required dataText}) {
-    return ExpandablePanel(
-      theme: const ExpandableThemeData(
-        headerAlignment: ExpandablePanelHeaderAlignment.center,
-        tapBodyToCollapse: true,
-        hasIcon: true,
-        iconColor: Colors.red,
-      ),
-      header: Text(header),
-      collapsed: Text(collapsedText, softWrap: true, maxLines: 2, overflow: TextOverflow.ellipsis),
-      expanded: Container(
-        padding: const EdgeInsets.all(18),
-        color: Color.fromARGB(255, 239, 239, 239),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            PlatformTextButton(
-              child: Text('Copy'),
-              onPressed: () => Clipboard.setData(ClipboardData(text: dataText)),
-              padding: const EdgeInsets.all(8),
-            ),
-            SelectableText(dataText, textAlign: TextAlign.left),
-          ],
-        ),
-      ),
-    );
-  }
-
+  /// Chỉ hiển thị DG1 + DG2 (và ảnh) sau khi đọc chip thành công.
   List<Widget> _mrtdDataWidgets() {
-    List<Widget> list = [];
-    if (_mrtdData == null) return list;
+    if (_mrtdData == null) return [];
+    final d = _mrtdData!;
+    final list = <Widget>[];
 
-    if (_mrtdData!.isPACE != null && _mrtdData!.isDBA != null)
+    if (d.dg1 != null) {
+      list.add(Text('DG1 (MRZ)', style: TextStyle(fontSize: 16.0, fontWeight: FontWeight.bold)));
+      list.add(SizedBox(height: 8));
+      list.add(SelectableText(formatMRZ(d.dg1!.mrz), style: TextStyle(fontFamily: 'monospace', fontSize: 13.0)));
+      list.add(SizedBox(height: 16));
+    }
+
+    if (d.dg2 != null) {
+      list.add(Text('DG2', style: TextStyle(fontSize: 16.0, fontWeight: FontWeight.bold)));
+      list.add(SizedBox(height: 4));
+      final hex = d.dg2!.toBytes().hex();
+      final hexPreview = hex.length > 280 ? '${hex.substring(0, 280)}…' : hex;
       list.add(
-        _makeMrtdAccessDataWidget(
-          header: "Access protocol",
-          collapsedText: '',
-          isDBA: _mrtdData!.isDBA!,
-          isPACE: _mrtdData!.isPACE!,
+        SelectableText(
+          'Dữ liệu thô (hex, rút gọn): $hexPreview',
+          style: TextStyle(fontSize: 11.0, color: Colors.black54),
         ),
       );
-
-    if (_mrtdData!.cardAccess != null) {
-      list.add(
-        _makeMrtdDataWidget(
-          header: 'EF.CardAccess',
-          collapsedText: '',
-          dataText: _mrtdData!.cardAccess!.toBytes().hex(),
-        ),
-      );
+      list.add(SizedBox(height: 8));
+      final img = d.dg2!.imageData;
+      if (img != null && img.isNotEmpty) {
+        list.add(Center(child: Image.memory(img, height: 200, fit: BoxFit.contain)));
+      } else {
+        list.add(Text('Không có imageData để hiển thị ảnh.', style: TextStyle(fontSize: 13, color: Colors.orange)));
+      }
     }
 
-    if (_mrtdData!.cardSecurity != null) {
-      list.add(
-        _makeMrtdDataWidget(
-          header: 'EF.CardSecurity',
-          collapsedText: '',
-          dataText: _mrtdData!.cardSecurity!.toBytes().hex(),
-        ),
-      );
-    }
-
-    if (_mrtdData!.sod != null) {
-      extractCertificatesFromSOD(_mrtdData!.sod!.toBytes());
-      list.add(
-        _makeMrtdDataWidget(header: 'EF.SOD', collapsedText: '', dataText: base64Encode(_mrtdData!.sod!.toBytes())),
-      );
-    }
-
-    if (_mrtdData!.com != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.COM', collapsedText: '', dataText: formatEfCom(_mrtdData!.com!)));
-    }
-
-    if (_mrtdData!.dg1 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG1', collapsedText: '', dataText: formatMRZ(_mrtdData!.dg1!.mrz)));
-    }
-
-    if (_mrtdData!.dg2 != null) {
-      print("🍌🍌🍌🍌🍌🍌🍌🍌🍌");
-      // print(_mrtdData!.dg2!.toBytes().toHex());
-      //
-      // String base64String = base64Encode(_mrzData!.dg2!.ima);
-      // Uint8List decodedData = base64Decode(base64String);
-      list.add(_makeMrtdDataWidget(header: 'EF.DG2', collapsedText: '', dataText: _mrtdData!.dg2!.toBytes().hex()));
-      final image = Image.memory(
-        base64Decode(base64Encode(_mrtdData!.dg2!.imageData!)),
-        width: 200,
-        height: 200,
-        fit: BoxFit.cover,
-      );
-
-      list.add(
-        ExpandablePanel(
-          theme: const ExpandableThemeData(
-            headerAlignment: ExpandablePanelHeaderAlignment.center,
-            tapBodyToCollapse: true,
-            hasIcon: true,
-            iconColor: Colors.red,
-          ),
-          header: Text("EF.DG2 - Ảnh khuôn mặt"),
-          collapsed: Text("Ảnh khuôn mặt"),
-          expanded: Container(
-            padding: const EdgeInsets.all(18),
-            color: Color.fromARGB(255, 239, 239, 239),
-            child: Column(
-              children: [
-                image,
-                SizedBox(height: 10),
-                PlatformTextButton(
-                  onPressed: () => Clipboard.setData(ClipboardData(text: base64Encode(_mrtdData!.dg2!.toBytes()))),
-                  child: Text("Sao chép Base64"),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    if (_mrtdData!.dg3 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG3', collapsedText: '', dataText: _mrtdData!.dg3!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg4 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG4', collapsedText: '', dataText: _mrtdData!.dg4!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg5 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG5', collapsedText: '', dataText: _mrtdData!.dg5!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg6 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG6', collapsedText: '', dataText: _mrtdData!.dg6!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg7 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG7', collapsedText: '', dataText: _mrtdData!.dg7!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg8 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG8', collapsedText: '', dataText: _mrtdData!.dg8!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg9 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG9', collapsedText: '', dataText: _mrtdData!.dg9!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg10 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG10', collapsedText: '', dataText: _mrtdData!.dg10!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg11 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG11', collapsedText: '', dataText: _mrtdData!.dg11!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg12 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG12', collapsedText: '', dataText: _mrtdData!.dg12!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg13 != null) {
-      readEfDG13(_mrtdData!.dg13!.toBytes());
-      list.add(_makeMrtdDataWidget(header: 'EF.DG13', collapsedText: '', dataText: _mrtdData!.dg13!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg14 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG14', collapsedText: '', dataText: _mrtdData!.dg14!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.dg15 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG15', collapsedText: '', dataText: _mrtdData!.dg15!.toBytes().hex()));
-    }
-
-    if (_mrtdData!.aaSig != null) {
-      list.add(
-        _makeMrtdDataWidget(
-          header: 'Active Authentication signature',
-          collapsedText: '',
-          dataText: _mrtdData!.aaSig!.hex(),
-        ),
-      );
-    }
-
-    if (_mrtdData!.dg16 != null) {
-      list.add(_makeMrtdDataWidget(header: 'EF.DG16', collapsedText: '', dataText: _mrtdData!.dg16!.toBytes().hex()));
+    if (list.isEmpty) {
+      list.add(Text('Đã đọc chip nhưng không có DG1/DG2 trên thẻ.', style: TextStyle(color: Colors.orange.shade800)));
     }
 
     return list;
   }
 
   PlatformScaffold _buildPage(BuildContext context) => PlatformScaffold(
-    appBar: PlatformAppBar(title: Text('MRTD Example App Quang Anh')),
+    appBar: PlatformAppBar(title: Text('Tú test NFC')),
     iosContentPadding: false,
     iosContentBottomPadding: false,
     body: Material(
@@ -898,12 +802,19 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 _buildForm(context),
-                SizedBox(height: 20),
                 PlatformElevatedButton(
                   // btn Read MRTD
                   onPressed: _buttonPressed,
-                  child: PlatformText(_isReading ? 'Reading ...' : 'Read Passport'),
+                  child: PlatformText(_isReading ? 'Đang đọc ...' : 'Bắt đầu đọc'),
                 ),
+                SizedBox(height: 12),
+                PlatformTextButton(
+                  onPressed: _isReading ? null : _sendFormToHost,
+                  child: PlatformText(
+                    _mrtdData != null ? 'Gửi kết quả đọc chip về host' : 'Xác nhận thông tin (form tay)',
+                  ),
+                ),
+                PlatformTextButton(onPressed: _isReading ? null : _cancelToHost, child: PlatformText('Hủy')),
                 SizedBox(height: 20),
                 Row(
                   children: <Widget>[
@@ -925,7 +836,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       Text(
-                        _mrtdData != null ? "Passport Data:" : "",
+                        _mrtdData != null ? "CCCD Data:" : "",
                         textAlign: TextAlign.center,
                         style: TextStyle(fontSize: 15.0, fontWeight: FontWeight.bold),
                       ),
@@ -945,181 +856,105 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
   );
 
   Widget _buildForm(BuildContext context) {
-    return Column(
-      children: <Widget>[
-        TabBar(
-          controller: _tabController,
-          labelColor: Colors.blue,
-          tabs: const <Widget>[
-            Tab(text: 'DBA'),
-            Tab(text: 'PACE'),
+    return Card(
+      borderOnForeground: false,
+      elevation: 0,
+      color: Colors.white,
+      margin: const EdgeInsets.all(16.0),
+      child: Form(
+        key: _mrzData,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            TextFormField(
+              enabled: !_disabledInput(),
+              controller: _docNumber,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'CCCD number',
+                fillColor: Colors.white,
+              ),
+              inputFormatters: <TextInputFormatter>[
+                FilteringTextInputFormatter.allow(RegExp(r'[A-Z0-9]+')),
+                LengthLimitingTextInputFormatter(14),
+              ],
+              textInputAction: TextInputAction.done,
+              textCapitalization: TextCapitalization.characters,
+              autofocus: true,
+              validator: (value) {
+                if (value?.isEmpty ?? false) {
+                  return 'Please enter passport number';
+                }
+                return null;
+              },
+            ),
+            SizedBox(height: 12),
+            TextFormField(
+              enabled: !_disabledInput(),
+              controller: _dob,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Date of Birth',
+                hintText: 'DD/MM/YYYY',
+                fillColor: Colors.white,
+              ),
+              autofocus: false,
+              validator: (value) {
+                if (value?.isEmpty ?? false) {
+                  return 'Please select Date of Birth';
+                }
+                return null;
+              },
+              onTap: () async {
+                FocusScope.of(context).requestFocus(FocusNode());
+                // Can pick date which dates 15 years back or more
+                final now = DateTime.now();
+                final firstDate = DateTime(now.year - 90, now.month, now.day);
+                final lastDate = DateTime(now.year - 15, now.month, now.day);
+                final initDate = _getDOBDate();
+                final date = await _pickDate(context, firstDate, initDate ?? lastDate, lastDate);
+
+                FocusScope.of(context).requestFocus(FocusNode());
+                if (date != null) {
+                  _dob.text = date;
+                }
+              },
+            ),
+            SizedBox(height: 12),
+            TextFormField(
+              enabled: !_disabledInput(),
+              controller: _doe,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Date of Expiry',
+                hintText: 'DD/MM/YYYY',
+                fillColor: Colors.white,
+              ),
+              autofocus: false,
+              validator: (value) {
+                if (value?.isEmpty ?? false) {
+                  return 'Please select Date of Expiry';
+                }
+                return null;
+              },
+              onTap: () async {
+                FocusScope.of(context).requestFocus(FocusNode());
+                // Can pick date from tomorrow and up to 10 years
+                final now = DateTime.now();
+                final firstDate = DateTime(now.year, now.month, now.day + 1);
+                final lastDate = DateTime(now.year + 10, now.month + 6, now.day);
+                final initDate = _getDOEDate();
+                final date = await _pickDate(context, firstDate, initDate ?? firstDate, lastDate);
+
+                FocusScope.of(context).requestFocus(FocusNode());
+                if (date != null) {
+                  _doe.text = date;
+                }
+              },
+            ),
           ],
         ),
-        Container(
-          height: 400, // Increased height to accommodate the new scan button
-          child: TabBarView(
-            controller: _tabController,
-            children: <Widget>[
-              Card(
-                borderOnForeground: false,
-                elevation: 0,
-                color: Colors.white,
-                margin: const EdgeInsets.all(16.0),
-                child: Form(
-                  key: _mrzData,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      // Add a scan button at the top
-                      Container(
-                        width: double.infinity,
-                        margin: const EdgeInsets.only(bottom: 16.0),
-                        child: ElevatedButton.icon(
-                          onPressed: _isReading ? null : _navigateToMrzScanner,
-                          icon: Icon(Icons.document_scanner),
-                          label: Text('Scan Passport MRZ'),
-                          style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12.0)),
-                        ),
-                      ),
-                      TextFormField(
-                        enabled: !_disabledInput(),
-                        controller: _docNumber,
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          labelText: 'Passport number',
-                          fillColor: Colors.white,
-                        ),
-                        inputFormatters: <TextInputFormatter>[
-                          FilteringTextInputFormatter.allow(RegExp(r'[A-Z0-9]+')),
-                          LengthLimitingTextInputFormatter(14),
-                        ],
-                        textInputAction: TextInputAction.done,
-                        textCapitalization: TextCapitalization.characters,
-                        autofocus: true,
-                        validator: (value) {
-                          if (value?.isEmpty ?? false) {
-                            return 'Please enter passport number';
-                          }
-                          return null;
-                        },
-                      ),
-                      SizedBox(height: 12),
-                      TextFormField(
-                        enabled: !_disabledInput(),
-                        controller: _dob,
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          labelText: 'Date of Birth',
-                          fillColor: Colors.white,
-                        ),
-                        autofocus: false,
-                        validator: (value) {
-                          if (value?.isEmpty ?? false) {
-                            return 'Please select Date of Birth';
-                          }
-                          return null;
-                        },
-                        onTap: () async {
-                          FocusScope.of(context).requestFocus(FocusNode());
-                          // Can pick date which dates 15 years back or more
-                          final now = DateTime.now();
-                          final firstDate = DateTime(now.year - 90, now.month, now.day);
-                          final lastDate = DateTime(now.year - 15, now.month, now.day);
-                          final initDate = _getDOBDate();
-                          final date = await _pickDate(context, firstDate, initDate ?? lastDate, lastDate);
-
-                          FocusScope.of(context).requestFocus(FocusNode());
-                          if (date != null) {
-                            _dob.text = date;
-                          }
-                        },
-                      ),
-                      SizedBox(height: 12),
-                      TextFormField(
-                        enabled: !_disabledInput(),
-                        controller: _doe,
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          labelText: 'Date of Expiry',
-                          fillColor: Colors.white,
-                        ),
-                        autofocus: false,
-                        validator: (value) {
-                          if (value?.isEmpty ?? false) {
-                            return 'Please select Date of Expiry';
-                          }
-                          return null;
-                        },
-                        onTap: () async {
-                          FocusScope.of(context).requestFocus(FocusNode());
-                          // Can pick date from tomorrow and up to 10 years
-                          final now = DateTime.now();
-                          final firstDate = DateTime(now.year, now.month, now.day + 1);
-                          final lastDate = DateTime(now.year + 10, now.month + 6, now.day);
-                          final initDate = _getDOEDate();
-                          final date = await _pickDate(context, firstDate, initDate ?? firstDate, lastDate);
-
-                          FocusScope.of(context).requestFocus(FocusNode());
-                          if (date != null) {
-                            _doe.text = date;
-                          }
-                        },
-                      ),
-                      SizedBox(height: 12),
-                      CheckboxListTile(
-                        title: Text('DBA with PACE'),
-                        value: _checkBoxPACE,
-                        onChanged: (newValue) {
-                          setState(() {
-                            _checkBoxPACE = !_checkBoxPACE;
-                          });
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              Card(
-                borderOnForeground: false,
-                elevation: 0,
-                color: Colors.white,
-                //shadowColor: Colors.white,
-                margin: const EdgeInsets.all(16.0),
-                child: Form(
-                  key: _canData,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      TextFormField(
-                        enabled: !_disabledInput(),
-                        controller: _can,
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          labelText: 'CAN number',
-                          fillColor: Colors.white,
-                        ),
-                        inputFormatters: <TextInputFormatter>[
-                          FilteringTextInputFormatter.allow(RegExp(r'[0-9]+')),
-                          LengthLimitingTextInputFormatter(6),
-                        ],
-                        textInputAction: TextInputAction.done,
-                        textCapitalization: TextCapitalization.characters,
-                        autofocus: true,
-                        validator: (value) {
-                          if (value?.isEmpty ?? false) {
-                            return 'Please enter CAN number';
-                          }
-                          return null;
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -1326,20 +1161,20 @@ class _MrtdHomePageState extends State<MrtdHomePage> with TickerProviderStateMix
   //   return pemFormat.toString();
   // }
 
-  void _navigateToMrzScanner() async {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => MrzScannerScreen(
-          onMrzDataReceived: (docNumber, dob, doe) {
-            setState(() {
-              _docNumber.text = docNumber;
-              _dob.text = dob;
-              _doe.text = doe;
-            });
-          },
-        ),
-      ),
-    );
-  }
+  // void _navigateToMrzScanner() async {
+  //   Navigator.push(
+  //     context,
+  //     MaterialPageRoute(
+  //       builder: (context) => MrzScannerScreen(
+  //         onMrzDataReceived: (docNumber, dob, doe) {
+  //           setState(() {
+  //             _docNumber.text = docNumber;
+  //             _dob.text = dob;
+  //             _doe.text = doe;
+  //           });
+  //         },
+  //       ),
+  //     ),
+  //   );
+  // }
 }
