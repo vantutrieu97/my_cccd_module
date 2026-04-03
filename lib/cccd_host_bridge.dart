@@ -7,7 +7,8 @@ import 'package:flutter/services.dart';
 ///
 /// - [getLaunchArgs]: đọc extra Intent (cccd, dob, doe).
 /// - [finishWithJson]: gửi **chuỗi JSON thuần** qua MethodChannel → host `putExtra(flutter_result)` → `setResult` → `finish()`.
-///   (Không ghi file — tránh lỗi path / plugin; payload nên gọn, vd. không gửi ảnh base64.)
+///   Payload gồm `cccd`, `dob`, `doe`, `dg1`, `dg2ImagePath`, `readDurationSeconds` (giây), ...
+///   (Không gửi ảnh base64 mặc định — tránh TransactionTooLarge.)
 class CccdHostBridge {
   CccdHostBridge._();
 
