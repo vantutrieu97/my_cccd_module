@@ -1,5 +1,5 @@
+import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:cccd_vietnam/dmrtd.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'cccd_host_bridge.dart';
 import 'cccd_scan_helpers.dart';
+import 'mta_host_ui_tokens.dart';
 import 'mrtd_data.dart';
 
 void main() {
@@ -29,12 +30,7 @@ void main() {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
-        scaffoldBackgroundColor: Colors.transparent,
-        canvasColor: Colors.transparent,
-      ),
+      theme: MtaHostUi.theme(),
       home: const MrtdHomePage(),
       debugShowCheckedModeBanner: false,
     ),
@@ -49,7 +45,13 @@ class MrtdHomePage extends StatefulWidget {
 }
 
 class _MrtdHomePageState extends State<MrtdHomePage> {
+  /// Thông báo lỗi (đỏ).
   var _alertMessage = '';
+
+  /// Trạng thái từng bước đọc NFC (xám) hoặc lỗi tạm nếu [ _statusIsError ].
+  var _statusLine = '';
+  var _statusIsError = false;
+
   final _log = Logger('mrtdeg.app');
   var _isNfcAvailable = false;
   var _isReading = false;
@@ -133,10 +135,39 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
     return ok;
   }
 
-  Future<void> _cancelToHost() async {
-    if (_isReading) return;
-    final ok = await CccdHostBridge.finishWithJson({'cancelled': true, 'source': 'user_cancel'});
-    if (mounted && !ok) setState(() => _alertMessage = 'Không gửi được về host.');
+  void _setNfcStatus(String line, {bool isError = false}) {
+    if (!mounted) return;
+    setState(() {
+      _statusLine = line;
+      _statusIsError = isError;
+      _alertMessage = '';
+    });
+  }
+
+  /// Đóng màn / về host: luôn gọi được; nếu đang đọc chip thì ngắt NFC trước.
+  Future<void> _onClosePressed() async {
+    FocusScope.of(context).unfocus();
+    final wasReading = _isReading;
+    if (wasReading) {
+      try {
+        await _nfc.disconnect(iosErrorMessage: 'Đã hủy');
+      } catch (_) {}
+      if (mounted) {
+        setState(() => _isReading = false);
+      }
+    }
+    if (!mounted) return;
+    final ok = await CccdHostBridge.finishWithJson({
+      'cancelled': true,
+      'source': wasReading ? 'user_close_while_reading' : 'user_cancel',
+    });
+    if (mounted && !ok) {
+      setState(() {
+        _alertMessage = 'Không gửi được về host.';
+        _statusLine = '';
+        _statusIsError = false;
+      });
+    }
   }
 
   Future<void> _initPlatformState() async {
@@ -153,8 +184,8 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
   DateTime? _dobDt() => tryParseDisplayDate(_dob.text);
   DateTime? _doeDt() => tryParseDisplayDate(_doe.text);
 
+  /// Date picker Material: mặc định nhập tay (input); có thể chuyển sang lịch trong cùng dialog.
   Future<void> _pickDate({required bool isDob}) async {
-    final ctx = context;
     final now = DateTime.now();
     final DateTime first;
     final DateTime last;
@@ -162,9 +193,11 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
     if (isDob) {
       first = DateTime(now.year - 90, now.month, now.day);
       last = DateTime(now.year - 15, now.month, now.day);
-      initial = _dobDt() ?? last;
+      var i = _dobDt() ?? last;
+      if (i.isBefore(first)) i = first;
+      if (i.isAfter(last)) i = last;
+      initial = i;
     } else {
-      // Ngày hết hạn: dải theo yêu cầu nghiệp vụ (picker vẫn bắt buộc first/last).
       first = DateTime(1945, 1, 1);
       last = DateTime(2100, 12, 31);
       var i = _doeDt() ?? DateTime(now.year + 10, now.month, now.day);
@@ -172,47 +205,64 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
       if (i.isAfter(last)) i = last;
       initial = i;
     }
+
     final picked = await showDatePicker(
-      context: ctx,
+      context: context,
       firstDate: first,
       initialDate: initial,
       lastDate: last,
-      // Locale vi: ô nhập trong date picker dùng dd/MM/yyyy (không bị mm/dd như en_US).
       locale: const Locale('vi', 'VN'),
-      initialEntryMode: isDob ? DatePickerEntryMode.calendar : DatePickerEntryMode.input,
+      initialEntryMode: DatePickerEntryMode.input,
     );
-    if (picked == null || !mounted) return;
-    final s = kDisplayDateFormat.format(picked);
-    if (isDob) {
-      _dob.text = s;
-    } else {
-      _doe.text = s;
-    }
+
+    if (!mounted || picked == null) return;
+    setState(() {
+      if (isDob) {
+        _dob.text = kDisplayDateFormat.format(picked);
+      } else {
+        _doe.text = kDisplayDateFormat.format(picked);
+      }
+    });
   }
 
   /// BAC (ICAO 9303) — không cần EF.CardAccess. Thời gian: từ lúc bắt đầu kết nối tới xong DG2.
   Future<void> _readChip() async {
     if (_docNumber.text.isEmpty || _dob.text.isEmpty || _doe.text.isEmpty) {
-      setState(() => _alertMessage = 'Nhập đủ số CCCD, ngày sinh, ngày hết hạn.');
+      setState(() {
+        _alertMessage = 'Nhập đủ số CCCD, ngày sinh, ngày hết hạn.';
+        _statusLine = '';
+        _statusIsError = false;
+      });
       return;
     }
     if (_dobDt() == null || _doeDt() == null) {
-      setState(() => _alertMessage = 'Định dạng ngày: DD/MM/YYYY.');
+      setState(() {
+        _alertMessage = 'Định dạng ngày: DD/MM/YYYY.';
+        _statusLine = '';
+        _statusIsError = false;
+      });
       return;
     }
     final doc = normalizeDocNumberForRead(_docNumber.text);
     if (doc.isEmpty) {
-      setState(() => _alertMessage = 'Số CCCD không hợp lệ.');
+      setState(() {
+        _alertMessage = 'Số CCCD không hợp lệ.';
+        _statusLine = '';
+        _statusIsError = false;
+      });
       return;
     }
 
     final swTotal = Stopwatch()..start();
     final phaseMs = <String, int>{};
+    String? nfcDisconnectError;
     try {
       setState(() {
         _mrtdData = null;
         _lastReadSeconds = null;
-        _alertMessage = 'Áp chip CCCD vào thiết bị...';
+        _alertMessage = '';
+        _statusIsError = false;
+        _statusLine = 'Đang tìm chip — áp mặt sau CCCD vào thiết bị…';
         _isReading = true;
       });
 
@@ -229,7 +279,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
           'Không phải chip CCCD/ePassport (ISO-7816) hoặc đã mất thẻ. Giữ thẻ sát điện thoại và thử lại.',
         );
       }
-      setState(() => _alertMessage = 'Đang đọc chip...');
+      _setNfcStatus('Đã kết nối chip. Đang xác thực BAC (khóa từ số CCCD và ngày)…');
 
       final passport = Passport(_nfc);
       final mrtdData = MrtdData()
@@ -240,23 +290,30 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
       await passport.startSession(DBAKey(doc, _dobDt()!, _doeDt()!));
       swBac.stop();
       phaseMs['bac'] = swBac.elapsedMilliseconds;
+      if (!mounted) return;
+      _setNfcStatus('BAC thành công. Đang đọc danh mục dữ liệu trên chip (COM)…');
 
       final swCom = Stopwatch()..start();
       mrtdData.com = await passport.readEfCOM();
       swCom.stop();
       phaseMs['com'] = swCom.elapsedMilliseconds;
+      if (!mounted) return;
 
       if (mrtdData.com!.dgTags.contains(EfDG1.TAG)) {
+        _setNfcStatus('Đang đọc dữ liệu nhận dạng (DG1)…');
         final swDg1 = Stopwatch()..start();
         mrtdData.dg1 = await passport.readEfDG1();
         swDg1.stop();
         phaseMs['dg1'] = swDg1.elapsedMilliseconds;
+        if (!mounted) return;
       }
       if (mrtdData.com!.dgTags.contains(EfDG2.TAG)) {
+        _setNfcStatus('Đang đọc ảnh chân dung (DG2)…');
         final swDg2 = Stopwatch()..start();
         mrtdData.dg2 = await passport.readEfDG2();
         swDg2.stop();
         phaseMs['dg2'] = swDg2.elapsedMilliseconds;
+        if (!mounted) return;
       }
 
       swTotal.stop();
@@ -266,10 +323,10 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
         '${phaseMs.entries.map((e) => '${e.key}=${e.value}ms').join(', ')}',
       );
 
+      _setNfcStatus('Đọc chip xong. Đang gửi kết quả về ứng dụng…');
       setState(() {
         _mrtdData = mrtdData;
         _lastReadSeconds = sec;
-        _alertMessage = '';
       });
 
       final hostClosed = await _returnToHost(mrtdData, sec);
@@ -283,17 +340,33 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
           'NFC pha trước lỗi: ${phaseMs.entries.map((e) => '${e.key}=${e.value}ms').join(', ')}',
         );
       }
-      if (mounted) setState(() => _alertMessage = _mapErrorMessage(e));
+      if (mounted) {
+        final msg = _mapErrorMessage(e);
+        if (msg.isNotEmpty) {
+          nfcDisconnectError = msg;
+          _setNfcStatus(msg, isError: true);
+        } else {
+          _setNfcStatus('Đã hủy hoặc ngắt kết nối.', isError: true);
+        }
+      }
     } finally {
       if (swTotal.isRunning) swTotal.stop();
       try {
-        if (_alertMessage.isNotEmpty) {
-          await _nfc.disconnect(iosErrorMessage: _alertMessage);
+        if (nfcDisconnectError != null && nfcDisconnectError.isNotEmpty) {
+          await _nfc.disconnect(iosErrorMessage: nfcDisconnectError);
         } else {
           await _nfc.disconnect(iosAlertMessage: 'Hoàn tất');
         }
       } catch (_) {}
-      if (mounted) setState(() => _isReading = false);
+      if (mounted) {
+        setState(() {
+          _isReading = false;
+          if (nfcDisconnectError == null) {
+            _statusLine = '';
+            _statusIsError = false;
+          }
+        });
+      }
     }
   }
 
@@ -317,9 +390,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
   bool get _disabled => _isReading || !_isNfcAvailable;
 
   void _dismissToHost() {
-    if (_isReading) return;
-    FocusScope.of(context).unfocus();
-    _cancelToHost();
+    unawaited(_onClosePressed());
   }
 
   Future<void> _pickDateIfEnabled({required bool isDob}) async {
@@ -329,14 +400,17 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
   }
 
   /// Form trong thẻ modal (scrim + surface nằm ở [build]).
-  List<Widget> _buildFormBody() {
+  List<Widget> _buildFormBody(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    final feedbackLine = _alertMessage.isNotEmpty ? _alertMessage : _statusLine;
+    final feedbackIsErr = _alertMessage.isNotEmpty || _statusIsError;
     return [
       TextField(
         enabled: !_disabled,
         controller: _docNumber,
+        style: t.bodyLarge,
         decoration: const InputDecoration(
-          border: OutlineInputBorder(),
-          labelText: 'Số CCCD (nhập tùy độ dài; BAC dùng 9 số cuối)',
+          labelText: 'Số CCCD',
         ),
         keyboardType: const TextInputType.numberWithOptions(decimal: false, signed: false),
         inputFormatters: [
@@ -349,10 +423,10 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
         enabled: !_disabled,
         controller: _dob,
         readOnly: true,
+        style: t.bodyLarge,
         decoration: InputDecoration(
-          border: const OutlineInputBorder(),
           labelText: 'Ngày sinh',
-          hintText: 'DD/MM/YYYY — chạm ô hoặc biểu tượng lịch',
+          hintText: 'Chạm để nhập hoặc chọn lịch (dd/MM/yyyy)',
           suffixIcon: IconButton(
             icon: const Icon(Icons.calendar_month),
             tooltip: 'Chọn ngày sinh',
@@ -365,49 +439,64 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
       TextField(
         enabled: !_disabled,
         controller: _doe,
-        keyboardType: TextInputType.datetime,
+        readOnly: true,
+        style: t.bodyLarge,
         decoration: InputDecoration(
-          border: const OutlineInputBorder(),
           labelText: 'Ngày hết hạn',
-          hintText: 'DD/MM/YYYY — gõ tay hoặc nút lịch',
+          hintText: 'Chạm để nhập hoặc chọn lịch (dd/MM/yyyy)',
           suffixIcon: IconButton(
             icon: const Icon(Icons.calendar_month),
             tooltip: 'Chọn ngày',
             onPressed: () => _pickDateIfEnabled(isDob: false),
           ),
         ),
+        onTap: () => _pickDateIfEnabled(isDob: false),
       ),
       const SizedBox(height: 16),
       FilledButton(
         onPressed: _disabled ? null : _readChip,
         child: Text(_isReading ? 'Đang đọc...' : 'Đọc chip (NFC)'),
       ),
-      const SizedBox(height: 8),
-      TextButton(onPressed: _isReading ? null : _cancelToHost, child: const Text('Hủy')),
       if (!_isNfcAvailable)
         Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text('Bật NFC để đọc thẻ.', style: TextStyle(color: Colors.orange.shade800)),
+          child: Text(
+            'Bật NFC để đọc thẻ.',
+            style: t.bodyMedium?.copyWith(color: MtaHostUi.warning, fontWeight: FontWeight.w600),
+          ),
         ),
-      if (_alertMessage.isNotEmpty)
+      if (feedbackLine.isNotEmpty)
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: Text(
-            _alertMessage,
+            feedbackLine,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontWeight: FontWeight.w600),
+            style: t.bodyMedium?.copyWith(
+              color: feedbackIsErr ? MtaHostUi.error : MtaHostUi.textSecondary,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       if (_lastReadSeconds != null)
         Text(
           'Thời gian đọc: ${_lastReadSeconds!.toStringAsFixed(2)} giây',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey.shade700),
+          style: t.bodySmall?.copyWith(color: MtaHostUi.textSecondary),
         ),
       if (_mrtdData?.dg2?.imageData != null && _mrtdData!.dg2!.imageData!.isNotEmpty) ...[
         const SizedBox(height: 12),
         Center(
-          child: Image.memory(_mrtdData!.dg2!.imageData!, height: 160, fit: BoxFit.contain),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: ColoredBox(
+              color: MtaHostUi.surface,
+              child: Image.memory(
+                _mrtdData!.dg2!.imageData!,
+                height: 160,
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
         ),
       ],
     ];
@@ -416,15 +505,18 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.sizeOf(context);
-    final maxCardW = math.min(640.0, mq.width * 0.92);
-    final maxCardH = mq.height * 0.9;
-    final scheme = Theme.of(context).colorScheme;
+    final pad = MediaQuery.paddingOf(context);
+    final availW = mq.width - pad.horizontal;
+    final availH = mq.height - pad.vertical;
+    final cardW = availW * MtaHostUi.cardWidthFraction;
+    final maxCardH = availH * MtaHostUi.cardMaxHeightFraction;
+    final t = Theme.of(context).textTheme;
 
-    // Chuẩn modal: scrim giống showDialog (black54), Back = hủy; host translucent → thấy màn phía sau.
+    // Cùng tông / tỷ lệ với MRZ dialog host: 80% ngang, cao theo content (tối đa 92%), scrim black54.
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) _dismissToHost();
+        if (!didPop) unawaited(_onClosePressed());
       },
       child: Scaffold(
         backgroundColor: Colors.transparent,
@@ -436,49 +528,62 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
               Positioned.fill(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: _isReading ? null : _dismissToHost,
+                  onTap: _dismissToHost,
                   child: const ColoredBox(color: Colors.black54),
                 ),
               ),
               Center(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: maxCardW, maxHeight: maxCardH),
+                child: SizedBox(
+                  width: cardW,
                   child: Material(
-                    elevation: 18,
-                    shadowColor: Colors.black54,
+                    elevation: MtaHostUi.cardElevation,
+                    shadowColor: Colors.black26,
                     surfaceTintColor: Colors.transparent,
-                    color: scheme.surface,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    color: MtaHostUi.background,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(MtaHostUi.cardRadius),
+                    ),
                     clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        ListTile(
-                          tileColor: scheme.primaryContainer,
-                          title: Text(
-                            'Đọc chip CCCD',
-                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  color: scheme.onPrimaryContainer,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(maxHeight: maxCardH),
+                      child: SingleChildScrollView(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      Text(
+                                        'Đọc chip CCCD',
+                                        style: t.titleLarge,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        'Kiểm tra số CCCD và ngày, rồi áp thẻ để đọc chip NFC.',
+                                        style: t.bodyMedium?.copyWith(color: MtaHostUi.textSecondary),
+                                      ),
+                                    ],
+                                  ),
                                 ),
-                          ),
-                          trailing: IconButton(
-                            tooltip: 'Đóng',
-                            onPressed: _isReading ? null : _cancelToHost,
-                            icon: Icon(Icons.close, color: scheme.onPrimaryContainer),
-                          ),
-                        ),
-                        Expanded(
-                          child: SingleChildScrollView(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: _buildFormBody(),
+                                IconButton(
+                                  tooltip: 'Đóng',
+                                  onPressed: () => unawaited(_onClosePressed()),
+                                  icon: const Icon(Icons.close, color: MtaHostUi.textSecondary),
+                                ),
+                              ],
                             ),
-                          ),
+                            const SizedBox(height: 16),
+                            ..._buildFormBody(context),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
