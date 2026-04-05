@@ -5,6 +5,10 @@ import 'package:flutter/services.dart';
 
 /// API giao tiếp với app Android host (`SafeFlutterActivity` + `CccdFlutterModule`).
 ///
+/// Giao diện module dùng **nền trong suốt + lớp mờ + thẻ giữa** (`MrtdHomePage`): để nhìn thấy
+/// màn host phía sau, Activity host nên dùng theme **translucent** (ví dụ `windowIsTranslucent`,
+/// nền trong suốt) khi mở Flutter — khi đó có cảm giác “dialog của host”.
+///
 /// - [getLaunchArgs]: đọc extra Intent (cccd, dob, doe).
 /// - [finishWithJson]: gửi **chuỗi JSON thuần** qua MethodChannel → host `putExtra(flutter_result)` → `setResult` → `finish()`.
 ///   Payload gồm `cccd`, `dob`, `doe`, `dg1`, `dg2ImagePath`, `readDurationSeconds` (giây), ...
