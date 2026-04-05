@@ -300,7 +300,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
       if (!mounted) return;
 
       if (mrtdData.com!.dgTags.contains(EfDG1.TAG)) {
-        _setNfcStatus('Đang đọc dữ liệu nhận dạng (DG1)…');
+        _setNfcStatus('Đang lấy dữ liệu số CCCD, tên, ngày sinh, giới tính, quốc tịch, ngày hết hạn căn cước...');
         final swDg1 = Stopwatch()..start();
         mrtdData.dg1 = await passport.readEfDG1();
         swDg1.stop();
@@ -308,7 +308,7 @@ class _MrtdHomePageState extends State<MrtdHomePage> {
         if (!mounted) return;
       }
       if (mrtdData.com!.dgTags.contains(EfDG2.TAG)) {
-        _setNfcStatus('Đang đọc ảnh chân dung (DG2)…');
+        _setNfcStatus('Đang lấy ảnh chân dung…');
         final swDg2 = Stopwatch()..start();
         mrtdData.dg2 = await passport.readEfDG2();
         swDg2.stop();
