@@ -1,72 +1,90 @@
 #!/bin/bash
 set -e
 
+FLUTTER="${FLUTTER_HOME:-$(which flutter 2>/dev/null || echo "/Users/tungu/Documents/dev_env/flutter_3.41.6/bin/flutter")}"
+MAVEN_REPO_DIR="${MAVEN_REPO_DIR:-$(cd "$(dirname "$0")/../my-cccd-maven-" 2>/dev/null && pwd)}"
+
 REPO="build/host/outputs/repo"
-GROUP="com/example/my_cccd_module"
-OLD="flutter_release"
-NEW="nfc_cccd_module"
-VERSION="1.0"
+GROUP_PATH="com/example/my_cccd_module"
+OLD_ID="flutter_release"
+NEW_ID="nfc_cccd_module"
+VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //;s/+.*//' | tr -d ' ')
 
-OLD_DIR="$REPO/$GROUP/$OLD"
-NEW_DIR="$REPO/$GROUP/$NEW"
+echo "==> Version: $VERSION"
+echo "==> Flutter: $FLUTTER"
+echo "==> Maven repo: $MAVEN_REPO_DIR"
 
-# Tính lại checksum cho file text đã sửa nội dung
+# ── 1. Build ──────────────────────────────────────────────────────────────────
+echo ""
+echo "==> Building AAR..."
+"$FLUTTER" build aar --no-debug --no-profile --build-number="$VERSION"
+
+# ── 2. Rename flutter_release → nfc_cccd_module ───────────────────────────────
 checksum() {
     local f="$1"
-    md5 -q "$f"               > "${f}.md5"
+    md5 -q "$f"                          > "${f}.md5"
     shasum -a 1   "$f" | awk '{print $1}' > "${f}.sha1"
     shasum -a 256 "$f" | awk '{print $1}' > "${f}.sha256"
     shasum -a 512 "$f" | awk '{print $1}' > "${f}.sha512"
 }
 
-echo "==> Renaming '$OLD' → '$NEW'..."
+OLD_DIR="$REPO/$GROUP_PATH/$OLD_ID"
+NEW_DIR="$REPO/$GROUP_PATH/$NEW_ID"
+
+echo ""
+echo "==> Renaming '$OLD_ID' → '$NEW_ID' ($VERSION)..."
 
 rm -rf "$NEW_DIR"
 mkdir -p "$NEW_DIR/$VERSION"
 
-# Copy + rename tất cả file trong version folder (kể cả checksum files của binary)
 for f in "$OLD_DIR/$VERSION/"*; do
     fname=$(basename "$f")
-    new_fname="${fname/$OLD/$NEW}"
-    cp "$f" "$NEW_DIR/$VERSION/$new_fname"
+    cp "$f" "$NEW_DIR/$VERSION/${fname/$OLD_ID/$NEW_ID}"
 done
 
-# Cập nhật nội dung POM
-POM="$NEW_DIR/$VERSION/${NEW}-${VERSION}.pom"
-sed -i '' "s|<artifactId>${OLD}</artifactId>|<artifactId>${NEW}</artifactId>|g" "$POM"
+POM="$NEW_DIR/$VERSION/${NEW_ID}-${VERSION}.pom"
+sed -i '' "s|<artifactId>${OLD_ID}</artifactId>|<artifactId>${NEW_ID}</artifactId>|g" "$POM"
 checksum "$POM"
-echo "    POM updated."
 
-# Cập nhật nội dung .module (thay toàn bộ tên cũ, kể cả trong "name"/"url" của từng file)
-MODULE="$NEW_DIR/$VERSION/${NEW}-${VERSION}.module"
-sed -i '' "s|${OLD}|${NEW}|g" "$MODULE"
+MODULE="$NEW_DIR/$VERSION/${NEW_ID}-${VERSION}.module"
+sed -i '' "s|${OLD_ID}|${NEW_ID}|g" "$MODULE"
 checksum "$MODULE"
-echo "    .module updated."
 
-# Tạo maven-metadata.xml mới
-META="$NEW_DIR/maven-metadata.xml"
-cat > "$META" <<EOF
+cat > "$NEW_DIR/maven-metadata.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <metadata>
   <groupId>com.example.my_cccd_module</groupId>
-  <artifactId>${NEW}</artifactId>
+  <artifactId>${NEW_ID}</artifactId>
   <versioning>
     <release>${VERSION}</release>
-    <versions>
-      <version>${VERSION}</version>
-    </versions>
+    <versions><version>${VERSION}</version></versions>
     <lastUpdated>$(date +%Y%m%d%H%M%S)</lastUpdated>
   </versioning>
 </metadata>
 EOF
-checksum "$META"
-echo "    maven-metadata.xml created."
+checksum "$NEW_DIR/maven-metadata.xml"
 
-# Xoá thư mục flutter_release cũ
 rm -rf "$OLD_DIR"
+echo "    Done."
+
+# ── 3. Push lên GitHub maven repo ─────────────────────────────────────────────
+if [ -z "$MAVEN_REPO_DIR" ] || [ ! -d "$MAVEN_REPO_DIR/.git" ]; then
+    echo ""
+    echo "⚠️  Không tìm thấy maven repo tại: $MAVEN_REPO_DIR"
+    echo "   Set biến MAVEN_REPO_DIR=<path> rồi chạy lại."
+    exit 1
+fi
 
 echo ""
-echo "==> Done!"
-echo "    Artifact: com.example.my_cccd_module:${NEW}:${VERSION}"
-echo "    Consumer dùng:"
-echo "      implementation 'com.example.my_cccd_module:${NEW}:${VERSION}'"
+echo "==> Copying artifacts → $MAVEN_REPO_DIR ..."
+cp -r "$REPO/." "$MAVEN_REPO_DIR/"
+
+echo "==> Pushing to GitHub..."
+cd "$MAVEN_REPO_DIR"
+git add .
+git commit -m "publish nfc_cccd_module $VERSION"
+git push
+
+echo ""
+echo "✅ Published: com.example.my_cccd_module:nfc_cccd_module:$VERSION"
+echo "   implementation(\"com.example.my_cccd_module:nfc_cccd_module:$VERSION\")"
