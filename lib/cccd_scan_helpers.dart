@@ -94,6 +94,8 @@ Map<String, dynamic> buildCccdScanResultMapSync({
 
   final map = <String, dynamic>{
     'readDurationSeconds': readDurationSeconds,
+    /// Host dùng để biết chip có EF.DG1/MRZ đầy đủ hay không (hai loại chip).
+    'dg1Present': m != null,
     'cccd': (m?.documentNumber ?? fallbackDoc).trim(),
     'dob': m != null ? kDisplayDateFormat.format(m.dateOfBirth) : fallbackDob.trim(),
     'doe': m != null ? kDisplayDateFormat.format(m.dateOfExpiry) : fallbackDoe.trim(),
