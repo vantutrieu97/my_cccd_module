@@ -2,7 +2,8 @@
 set -e
 
 FLUTTER="${FLUTTER_HOME:-$(which flutter 2>/dev/null || echo "/Users/tungu/Documents/dev_env/flutter_3.41.6/bin/flutter")}"
-MAVEN_REPO_DIR="${MAVEN_REPO_DIR:-$(cd "$(dirname "$0")/../my-cccd-maven-" 2>/dev/null && pwd)}"
+MAVEN_REPO_SSH="git@github.com:vantutrieu97/my-cccd-maven-.git"
+MAVEN_CLONE="/tmp/my-cccd-maven-$$"
 
 REPO="build/host/outputs/repo"
 GROUP_PATH="com/example/my_cccd_module"
@@ -12,7 +13,7 @@ VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //;s/+.*//' | tr -d ' 
 
 echo "==> Version: $VERSION"
 echo "==> Flutter: $FLUTTER"
-echo "==> Maven repo: $MAVEN_REPO_DIR"
+echo "==> Maven repo: $MAVEN_REPO_SSH"
 
 # ── 1. Build ──────────────────────────────────────────────────────────────────
 echo ""
@@ -67,23 +68,22 @@ checksum "$NEW_DIR/maven-metadata.xml"
 rm -rf "$OLD_DIR"
 echo "    Done."
 
-# ── 3. Push lên GitHub maven repo ─────────────────────────────────────────────
-if [ -z "$MAVEN_REPO_DIR" ] || [ ! -d "$MAVEN_REPO_DIR/.git" ]; then
-    echo ""
-    echo "⚠️  Không tìm thấy maven repo tại: $MAVEN_REPO_DIR"
-    echo "   Set biến MAVEN_REPO_DIR=<path> rồi chạy lại."
-    exit 1
-fi
-
+# ── 3. Clone Maven repo, copy artifacts, push ─────────────────────────────────
 echo ""
-echo "==> Copying artifacts → $MAVEN_REPO_DIR ..."
-cp -r "$REPO/." "$MAVEN_REPO_DIR/"
+echo "==> Cloning Maven repo..."
+git clone --quiet "$MAVEN_REPO_SSH" "$MAVEN_CLONE"
+
+echo "==> Copying artifacts..."
+cp -r "$REPO/." "$MAVEN_CLONE/"
 
 echo "==> Pushing to GitHub..."
-cd "$MAVEN_REPO_DIR"
+cd "$MAVEN_CLONE"
 git add .
 git commit -m "publish nfc_cccd_module $VERSION"
-git push
+git push --quiet
+
+echo "==> Cleanup..."
+rm -rf "$MAVEN_CLONE"
 
 echo ""
 echo "✅ Published: com.example.my_cccd_module:nfc_cccd_module:$VERSION"
